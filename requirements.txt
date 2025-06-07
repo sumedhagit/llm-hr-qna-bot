@@ -5,3 +5,4 @@ langchain-google-genai
 chromadb
 pypdf
 tiktoken
+langchain_community
