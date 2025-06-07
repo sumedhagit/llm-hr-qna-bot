@@ -1,0 +1,7 @@
+google-generativeai
+streamlit
+langchain
+langchain-google-genai
+chromadb
+pypdf
+tiktoken
