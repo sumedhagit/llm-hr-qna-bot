@@ -15,143 +15,333 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
-http://googleusercontent.com/immersive_entry_chip/0
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules['pysqlite3']
 
+import streamlit as st
+import os
+import shutil # Used for clearing the persist directory if needed
 
-#### **Key Changes and Why They Fix the Timeout:**
+# LangChain specific imports for RAG
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.document_loaders import PyPDFLoader, TextLoader # For loading different document types
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
+from langchain_core.exceptions import OutputParserException # Specific exception for output parsing errors
 
-1.  **`PERSIST_DIRECTORY = "./chroma_db"`:** A constant for the directory where ChromaDB will save its data.
-2.  **`HR_POLICIES_DIR = "hr_policies"`:** Defined for clarity.
-3.  **Persistence Logic in `setup_rag()`:**
-    * It now checks if `PERSIST_DIRECTORY` exists and contains files.
-    * **If it exists:** It tries to load the `Chroma` vector store directly from disk. This is **very fast** and bypasses the re-embedding process.
-    * **If it doesn't exist (first run):** It calls a new helper function `create_and_persist_vectorstore()`.
-4.  **`create_and_persist_vectorstore()` function:**
-    * This function handles the loading, splitting, embedding, and **persisting (`vectorstore.persist()`)** of the ChromaDB collection.
-    * **`@st.cache_resource` for LLM and Embeddings:** While not strictly for persistence, caching the LLM and embedding models themselves prevents them from being re-instantiated on every Streamlit rerun, which can also save a small amount of time.
-5.  **Error Handling and `st.stop()`:** Added `st.stop()` after critical errors (like missing API key, no documents, embedding failure) to prevent the app from continuing in a broken state.
-
-#### **What you need to do:**
-
-1.  **Update `hr_policy_llm_rag_streamlit.py`:** Replace the *entire content* of your local `hr_policy_llm_rag_streamlit.py` with the code provided above.
-2.  **Ensure only ONE small `.txt` file is in `hr_policies` locally:** Before you push, confirm that your `hr_policies` folder contains ONLY a single, very small, simple `.txt` file (e.g., `test_policy.txt` with 2-3 sentences). **Absolutely no PDFs for this first test.**
-3.  **Commit and Push:**
-    ```bash
-    git add .
-    git commit -m "Implement ChromaDB persistence and extreme reduction for 504 fix"
-    git push origin main
-    ```
-    * If you encounter any `rejected` push errors, follow the usual `git pull origin main --rebase` (resolve conflicts if any) then `git push origin main`. If it's `stale info`, use `git push -f origin main`.
-4.  **Redeploy on Streamlit Community Cloud:**
-    * Go to your Streamlit Cloud dashboard, **delete the existing app deployment**, and then **create a new one**, ensuring `hr_policy_llm_rag_streamlit.py` is selected as the main file.
-
-This setup means that the very first deployment might still hit the timeout if your single test document is somehow problematic, but subsequent deployments will be much faster because the embeddings will be loaded from the persisted `chroma_db` directory (which Streamlit's file system will remember between deployments).
-
-Let me know if it works!
-# --- Streamlit Page Configuration ---
-st.set_page_config(page_title="RAG HR Policy Q&A Bot", page_icon="📚")
-st.title("📚 RAG-Powered HR Policy Q&A Assistant")
-st.write("Ask questions about specific HR policies based on provided documents.")
-
-# --- API Key Configuration (Securely from Streamlit Secrets) ---
+# --- Configuration ---
+# Get Google API key from Streamlit secrets.
+# This is crucial for authentication with Google Generative AI services.
 try:
-    gemini_api_key = st.secrets["gemini_api_key"]
-    genai.configure(api_key=gemini_api_key)
+    google_api_key = st.secrets["GEMINI_API_KEY"]
 except KeyError:
-    st.error("Error: Gemini API key not found in Streamlit secrets. "
-             "Please ensure 'gemini_api_key' is set in your app's secrets.")
-    st.stop()
-except Exception as e:
-    st.error(f"An unexpected error occurred during API key configuration: {e}")
-    st.stop()
+    st.error("GEMINI_API_KEY not found in Streamlit secrets. "
+             "Please add it to your Streamlit Cloud app secrets via "
+             "Settings > Secrets, or check your .streamlit/secrets.toml locally.")
+    st.stop() # Stop the app execution if the API key is not available.
 
-# --- RAG Setup: Load, Split, Embed, Store ---
+# Set the GOOGLE_API_KEY environment variable for LangChain and Google Generative AI clients.
+os.environ["GOOGLE_API_KEY"] = google_api_key
 
-# Persistent storage for ChromaDB (so it doesn't rebuild every time)
-# Note: For public web hosting, this might be more complex. For Streamlit Cloud,
-# it might rebuild on every refresh. For a persistent solution, consider a
-# dedicated vector DB or a more complex caching strategy.
-# For now, let's assume it rebuilds or stores to /tmp/chroma_db for the session.
-CHROMA_DB_PATH = "chroma_db" # Or "/tmp/chroma_db" if issues with permissions
+# --- Global/Cached Variables ---
+# Use st.session_state to store expensive, long-lived objects like the RAG chain
+# and the vector store. This prevents them from being re-initialized on every Streamlit rerun,
+# which greatly improves performance and avoids timeouts.
+if 'qa_chain' not in st.session_state:
+    st.session_state['qa_chain'] = None
+if 'vectorstore' not in st.session_state:
+    st.session_state['vectorstore'] = None
 
-@st.cache_resource # Cache this to avoid rebuilding the vector store on every rerun
-def setup_rag():
-    # 1. Load Documents
+# Define the directory where ChromaDB will persist its data (embeddings, metadata).
+# This directory will be created if it doesn't exist.
+PERSIST_DIRECTORY = "./chroma_db"
+# Define the directory containing your HR policy documents.
+# Ensure this directory exists in your GitHub repository alongside your app file.
+HR_POLICIES_DIR = "hr_policies"
+
+# --- Functions for RAG Setup ---
+
+@st.cache_resource(show_spinner=False)
+def get_gemini_llm():
+    """
+    Initializes and returns the Google Gemini LLM (Generative Language Model).
+    Uses caching to ensure the LLM is only initialized once per app session.
+    """
+    return ChatGoogleGenerativeAI(model="gemini-pro")
+
+@st.cache_resource(show_spinner=False)
+def get_embedding_model():
+    """
+    Initializes and returns the Google Generative AI Embeddings model.
+    Uses caching to ensure the embedding model is only initialized once per app session.
+    """
+    return GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+def load_documents(directory):
+    """
+    Loads all supported documents from a specified directory.
+    Currently supports .txt and .pdf files.
+    """
     documents = []
-    policy_dir = "hr_policies"
-    if not os.path.exists(policy_dir):
-        st.error(f"Error: The '{policy_dir}' directory was not found. Please create it and add your HR policy files.")
-        st.stop()
+    # Iterate through all files in the given directory.
+    for filename in os.listdir(directory):
+        filepath = os.path.join(directory, filename) # Construct the full file path.
+        if os.path.isfile(filepath): # Ensure it's a file, not a subdirectory.
+            try:
+                # Load text files.
+                if filename.lower().endswith(".txt"):
+                    loader = TextLoader(filepath)
+                    documents.extend(loader.load())
+                # Load PDF files.
+                elif filename.lower().endswith(".pdf"):
+                    loader = PyPDFLoader(filepath)
+                    documents.extend(loader.load())
+                else:
+                    # Warn about unsupported file types.
+                    st.warning(f"Skipping unsupported file type: {filename}. Only .txt and .pdf are supported.")
+            except Exception as e:
+                # Catch and display errors during document loading.
+                st.error(f"Error loading document {filename}: {e}")
+    return documents
 
-    for file_name in os.listdir(policy_dir):
-        file_path = os.path.join(policy_dir, file_name)
-        if file_name.endswith(".txt"):
-            loader = TextLoader(file_path)
-            documents.extend(loader.load())
-        elif file_name.endswith(".pdf"):
-            loader = PyPDFLoader(file_path)
-            documents.extend(loader.load())
-        # Add more loaders for other file types if needed (e.g., CSVLoader, Docx2txtLoader)
+def setup_rag():
+    """
+    Sets up the RAG system, implementing persistence for the Chroma vector store.
+    It first attempts to load an existing vector store from disk.
+    If no existing store is found or if loading fails, it creates a new one
+    by loading and processing documents, then persists it to disk.
+    """
+    llm = get_gemini_llm() # Get the cached LLM instance.
+    embeddings = get_embedding_model() # Get the cached embedding model instance.
 
-    if not documents:
-        st.warning(f"No documents found in the '{policy_dir}' directory. Please add some policy files (e.g., .txt, .pdf).")
-        st.stop()
+    # Check if the vector store persistence directory exists and contains data.
+    # This check prevents re-embedding documents on every app rerun after the first successful build.
+    if os.path.exists(PERSIST_DIRECTORY) and os.listdir(PERSIST_DIRECTORY):
+        st.info("Loading existing vector store from disk... This is much faster!")
+        try:
+            # Attempt to load the vector store from the persisted directory.
+            vectorstore = Chroma(persist_directory=PERSIST_DIRECTORY, embedding_function=embeddings)
+            st.session_state['vectorstore'] = vectorstore # Store in session state for future use.
+            st.success("Vector store loaded successfully from disk!")
+        except Exception as e:
+            # If loading fails (e.g., corrupted data, version mismatch), log error and try to re-embed.
+            st.error(f"Error loading existing vector store: {e}. Attempting to rebuild and re-embed.")
+            # Clean up the old directory before rebuilding.
+            if os.path.exists(PERSIST_DIRECTORY):
+                shutil.rmtree(PERSIST_DIRECTORY)
+            # Proceed to create and persist a new vector store.
+            vectorstore = create_and_persist_vectorstore(llm, embeddings)
+    else:
+        # If no existing vector store is found, create a new one from scratch.
+        st.info("No existing vector store found. Creating and persisting new vector store...")
+        vectorstore = create_and_persist_vectorstore(llm, embeddings)
 
-    # 2. Split Documents
-    # Use RecursiveCharacterTextSplitter for more intelligent splitting
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(documents)
+    # Define a custom prompt template for the RetrievalQA chain.
+    # This guides the LLM on how to behave and use the provided context.
+    prompt_template_string = """
+    You are an AI-powered HR Assistant for Google. Your task is to provide answers based ONLY on the provided HR policy context.
+    If the user asks a question, answer it concisely and directly from the context.
+    If the context does not contain enough information to answer the question, politely state that you cannot answer from the provided documents.
+    Do not make up information. Maintain a professional and helpful tone.
 
-    # 3. Create Embeddings
-    # Using GoogleGenerativeAIEmbeddings for consistency with Gemini
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001") # This is a common embedding model
+    Context:
+    {context}
 
-    # 4. Build a Vector Store (ChromaDB)
-    # This will create/load the vector store from the specified path
-    vectordb = Chroma.from_documents(
-        documents=splits,
-        embedding=embeddings,
-        persist_directory=CHROMA_DB_PATH
+    Question: {question}
+    """
+    custom_prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessagePromptTemplate.from_template(prompt_template_string),
+            HumanMessagePromptTemplate.from_template("{question}"),
+        ]
     )
-    # Persist the database to disk (important for subsequent runs)
-    vectordb.persist()
-    return vectordb
 
-# --- Initialize RAG components (this runs only once thanks to @st.cache_resource) ---
-try:
-    vectordb = setup_rag()
-    # 5. Setup the Retriever and LLM for RAG Chain
-    # Configure the LLM that will answer questions
-    llm = ChatGoogleGenerativeAI(model="models/gemini-1.5-flash-latest", temperature=0.2) # Lower temperature for factual answers
-
-    # Create a RetrievalQA chain
+    # Create the RAG chain using LangChain's RetrievalQA.
+    # The retriever component fetches relevant document chunks.
+    # 'chain_type="stuff"' means all retrieved documents are combined into one prompt.
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
-        chain_type="stuff", # 'stuff' means put all retrieved docs into the prompt
-        retriever=vectordb.as_retriever()
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}), # Retrieve top 3 relevant chunks.
+        chain_type="stuff",
+        prompt=custom_prompt, # Apply the custom prompt.
+        return_source_documents=True # This allows displaying source documents if desired.
     )
+    return qa_chain
+
+def create_and_persist_vectorstore(llm, embeddings):
+    """
+    Loads documents, splits them into manageable chunks, creates embeddings for each chunk,
+    builds a Chroma vector store, and then persists this store to disk.
+    This function is called only when the vector store needs to be built from scratch.
+    """
+    with st.spinner("Loading and processing documents... This may take a moment on first run."):
+        # Load documents from the HR policies directory.
+        documents = load_documents(HR_POLICIES_DIR)
+
+        if not documents:
+            st.error(f"No documents found in the '{HR_POLICIES_DIR}' directory. "
+                     "Please add some HR policy files (e.g., .txt, .pdf) to this folder "
+                     "and push them to GitHub.")
+            st.stop() # Stop the app if no documents are available to prevent further errors.
+
+        # Initialize text splitter to break large documents into smaller, manageable chunks.
+        # This is important because LLMs have context window limits.
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        splits = text_splitter.split_documents(documents)
+
+        # Create embeddings and build the Chroma vector store.
+        # This is the most resource-intensive step and is why persistence is crucial.
+        st.info(f"Creating embeddings for {len(splits)} document chunks...")
+        try:
+            vectorstore = Chroma.from_documents(
+                documents=splits,
+                embedding=embeddings,
+                persist_directory=PERSIST_DIRECTORY # Specify the directory for persistence.
+            )
+            vectorstore.persist() # Explicitly save the collection to disk.
+            st.session_state['vectorstore'] = vectorstore # Store in session state.
+            st.success("Vector store created and persisted successfully!")
+            return vectorstore
+        except Exception as e:
+            # Handle errors during embedding creation (e.g., API timeouts).
+            st.error(f"Error embedding content: {e}. "
+                     "This might be due to too many/large documents, an invalid API key, or network issues. "
+                     "Please check your `hr_policies` folder content and Streamlit secrets.")
+            st.stop() # Stop the app if embedding fails.
+
+# --- Streamlit UI ---
+
+# Configure the Streamlit page's title and icon.
+st.set_page_config(page_title="AI-Powered HR Policy Assistant", page_icon="🤖")
+
+# Apply custom CSS for better aesthetics and a consistent look.
+st.markdown(
+    """
+    <style>
+    .reportview-container {
+        background: #f0f2f6; /* Light gray background */
+    }
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 800px; /* Limit content width for better readability */
+    }
+    .stTextInput>div>div>input {
+        border-radius: 0.5rem;
+        border: 1px solid #ccc;
+        padding: 0.75rem;
+    }
+    .stButton>button {
+        border-radius: 0.5rem;
+        background-color: #4CAF50; /* Google Green-like */
+        color: white;
+        border: none;
+        padding: 0.8rem 1.5rem;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+    .stButton>button:hover {
+        background-color: #45a049;
+    }
+    .stAlert {
+        border-radius: 0.5rem;
+    }
+    .chat-bubble {
+        background-color: #e0f2f7; /* Light blue for assistant */
+        padding: 10px 15px;
+        border-radius: 15px;
+        margin-bottom: 10px;
+        max-width: 80%;
+        align-self: flex-start; /* Align assistant bubbles to the left */
+    }
+    .chat-bubble.user {
+        background-color: #d1e7dd; /* Light green for user */
+        align-self: flex-end; /* Align user bubbles to the right */
+    }
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.title("🤖 AI-Powered HR Policy Assistant")
+st.write("Ask questions about your HR policies, and I'll provide answers based on the documents you've uploaded.")
+st.markdown("---") # Add a separator
+
+# Initialize chat history in session state if it doesn't exist.
+# This keeps the conversation persistent across Streamlit reruns.
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display chat messages from history on app rerun.
+# Each message is displayed in a chat bubble style.
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# --- RAG Setup (cached to run only once or on config change) ---
+# This block attempts to set up the RAG chain.
+# If an error occurs during setup, it's caught and displayed, and the app stops.
+try:
+    if st.session_state['qa_chain'] is None:
+        st.session_state['qa_chain'] = setup_rag()
 except Exception as e:
-    st.error(f"Error setting up RAG system: {e}")
-    st.info("Please ensure your 'hr_policies' directory exists with valid documents and all libraries are installed.")
-    st.stop()
+    st.error(f"Error during RAG system setup: {e}")
+    st.stop() # Stop the app if RAG setup fails critically.
 
+# Chat input for the user to ask questions.
+if prompt := st.chat_input("Ask a question about HR policies..."):
+    # Add user message to chat history.
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Display user message in the chat interface.
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-# --- Streamlit Interaction ---
-user_question = st.text_input("Ask a question about HR policies:", placeholder="e.g., How many sick days do we get?")
+    # Get response from the RAG chain.
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty() # Placeholder for streaming or dynamic content.
+        full_response = "" # Accumulate the full response.
+        try:
+            # Invoke the cached RAG chain with the user's query.
+            response = st.session_state['qa_chain'].invoke({"query": prompt})
+            # Extract the main answer from the RAG chain's response.
+            answer = response.get("result", "I couldn't find an answer based on the provided documents.")
+            full_response = answer
 
-if st.button("Get Answer"):
-    if user_question:
-        with st.spinner("Searching and generating answer..."):
-            try:
-                # Get the answer from the RAG chain
-                response = qa_chain.invoke(user_question)
-                st.write(response["result"]) # The answer is in the "result" key
+            # Optionally, display source documents for transparency.
+            source_docs = response.get("source_documents", [])
+            if source_docs:
+                full_response += "\n\n**Sources:**\n"
+                # Iterate through source documents and append a preview of their content.
+                for i, doc in enumerate(source_docs):
+                    # Limit content preview to avoid cluttering the UI.
+                    content_preview = doc.page_content[:250] + "..." if len(doc.page_content) > 250 else doc.page_content
+                    # Use os.path.basename to get just the filename.
+                    full_response += f"- Document: `{os.path.basename(doc.metadata.get('source', 'Unknown'))}`\n  Content: `{content_preview}`\n"
 
-            except Exception as e:
-                st.error(f"An error occurred while getting the answer: {e}")
-                st.info("Please check the 'View app logs' for more details.")
-    else:
-        st.warning("Please enter a question.")
+        except OutputParserException as e:
+            # Handle specific errors related to LLM output parsing.
+            full_response = (f"An error occurred while processing the AI response: {e}. "
+                             "The model might have generated an unexpected output format.")
+            st.error(full_response)
+        except Exception as e:
+            # Catch any other general exceptions during RAG system interaction.
+            full_response = (f"An error occurred while getting a response from the RAG system: {e}. "
+                             "Please try again later. Check your API key and document content.")
+            st.error(full_response)
 
-st.markdown("---")
-st.markdown("Developed by [Your Name] for AI Strategist Portfolio (RAG Enabled)")
+        # Update the message placeholder with the full accumulated response.
+        message_placeholder.markdown(full_response)
+
+    # Add the assistant's response to the chat history.
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+
