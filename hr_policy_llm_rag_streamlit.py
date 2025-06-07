@@ -1,7 +1,13 @@
 import streamlit as st
 import google.generativeai as genai
 import os
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules['pysqlite3']
 
+import streamlit as st
+# ... (rest of your existing imports)
+from langchain_community.vectorstores import Chroma
 # LangChain specific imports for RAG
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
