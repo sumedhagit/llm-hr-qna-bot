@@ -209,7 +209,7 @@ def create_and_persist_vectorstore(llm, embeddings):
 # --- Streamlit UI ---
 
 # Configure the Streamlit page's title and icon.
-st.set_page_config(page_title="AI-Powered HR Policy Assistant", page_icon="�")
+st.set_page_config(page_title="AI-Powered HR Policy Assistant", page_icon="🤖")
 
 # Apply custom CSS for better aesthetics and a consistent look.
 st.markdown(
@@ -332,4 +332,3 @@ if prompt := st.chat_input("Ask a question about HR policies..."):
 
     # Add the assistant's response to the chat history.
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-�
