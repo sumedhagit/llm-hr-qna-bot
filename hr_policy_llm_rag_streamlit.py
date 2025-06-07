@@ -15,7 +15,39 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
+http://googleusercontent.com/immersive_entry_chip/0
 
+
+#### **Key Changes and Why They Fix the Timeout:**
+
+1.  **`PERSIST_DIRECTORY = "./chroma_db"`:** A constant for the directory where ChromaDB will save its data.
+2.  **`HR_POLICIES_DIR = "hr_policies"`:** Defined for clarity.
+3.  **Persistence Logic in `setup_rag()`:**
+    * It now checks if `PERSIST_DIRECTORY` exists and contains files.
+    * **If it exists:** It tries to load the `Chroma` vector store directly from disk. This is **very fast** and bypasses the re-embedding process.
+    * **If it doesn't exist (first run):** It calls a new helper function `create_and_persist_vectorstore()`.
+4.  **`create_and_persist_vectorstore()` function:**
+    * This function handles the loading, splitting, embedding, and **persisting (`vectorstore.persist()`)** of the ChromaDB collection.
+    * **`@st.cache_resource` for LLM and Embeddings:** While not strictly for persistence, caching the LLM and embedding models themselves prevents them from being re-instantiated on every Streamlit rerun, which can also save a small amount of time.
+5.  **Error Handling and `st.stop()`:** Added `st.stop()` after critical errors (like missing API key, no documents, embedding failure) to prevent the app from continuing in a broken state.
+
+#### **What you need to do:**
+
+1.  **Update `hr_policy_llm_rag_streamlit.py`:** Replace the *entire content* of your local `hr_policy_llm_rag_streamlit.py` with the code provided above.
+2.  **Ensure only ONE small `.txt` file is in `hr_policies` locally:** Before you push, confirm that your `hr_policies` folder contains ONLY a single, very small, simple `.txt` file (e.g., `test_policy.txt` with 2-3 sentences). **Absolutely no PDFs for this first test.**
+3.  **Commit and Push:**
+    ```bash
+    git add .
+    git commit -m "Implement ChromaDB persistence and extreme reduction for 504 fix"
+    git push origin main
+    ```
+    * If you encounter any `rejected` push errors, follow the usual `git pull origin main --rebase` (resolve conflicts if any) then `git push origin main`. If it's `stale info`, use `git push -f origin main`.
+4.  **Redeploy on Streamlit Community Cloud:**
+    * Go to your Streamlit Cloud dashboard, **delete the existing app deployment**, and then **create a new one**, ensuring `hr_policy_llm_rag_streamlit.py` is selected as the main file.
+
+This setup means that the very first deployment might still hit the timeout if your single test document is somehow problematic, but subsequent deployments will be much faster because the embeddings will be loaded from the persisted `chroma_db` directory (which Streamlit's file system will remember between deployments).
+
+Let me know if it works!
 # --- Streamlit Page Configuration ---
 st.set_page_config(page_title="RAG HR Policy Q&A Bot", page_icon="📚")
 st.title("📚 RAG-Powered HR Policy Q&A Assistant")
