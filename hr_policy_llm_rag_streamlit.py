@@ -16,9 +16,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.document_loaders import PyPDFLoader, TextLoader # For loading different document types
-# IMPORTANT: For RetrievalQA with chain_type="stuff", use PromptTemplate directly, not ChatPromptTemplate.
-# Updated import: Import PromptTemplate from langchain_core.prompts for consistency
-from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate, PromptTemplate
+# IMPORTANT: For RetrievalQA with chain_type="stuff", use PromptTemplate directly.
+# Changed import: Import PromptTemplate from langchain.prompts to ensure compatibility
+from langchain.prompts import PromptTemplate
 
 
 # --- Configuration ---
