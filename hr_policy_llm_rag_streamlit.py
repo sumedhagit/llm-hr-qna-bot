@@ -17,7 +17,7 @@ from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.document_loaders import PyPDFLoader, TextLoader # For loading different document types
 # IMPORTANT: For RetrievalQA with chain_type="stuff", use PromptTemplate directly.
-# Changed import: Import PromptTemplate from langchain.prompts to ensure compatibility
+# Updated import: Import PromptTemplate from langchain.prompts to ensure compatibility
 from langchain.prompts import PromptTemplate
 
 
@@ -147,11 +147,9 @@ def setup_rag():
 
     Question: {question}
     """
-    # Using PromptTemplate as required for RetrievalQA with "stuff" chain type.
-    custom_prompt = PromptTemplate(
-        template=prompt_template_string,
-        input_variables=["context", "question"]
-    )
+    # Using PromptTemplate.from_template for compatibility with RetrievalQA.
+    # Removed explicit input_variables as from_template usually infers them.
+    custom_prompt = PromptTemplate.from_template(prompt_template_string)
 
     # Create the RAG chain using LangChain's RetrievalQA.
     # The retriever component fetches relevant document chunks.
