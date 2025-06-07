@@ -1,20 +1,6 @@
-import streamlit as st
-import google.generativeai as genai
-import os
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules['pysqlite3']
-
-import streamlit as st
-# ... (rest of your existing imports)
-from langchain_community.vectorstores import Chroma
-# LangChain specific imports for RAG
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
+# Fix for sqlite3 version on Streamlit Cloud
+# This needs to be at the very top of the file, before any other imports that might
+# implicitly load sqlite3 (e.g., chromadb which is used by langchain_community.vectorstores).
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules['pysqlite3']
@@ -30,8 +16,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.document_loaders import PyPDFLoader, TextLoader # For loading different document types
-from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
-from langchain_core.exceptions import OutputParserException # Specific exception for output parsing errors
+# IMPORTANT: For RetrievalQA with chain_type="stuff", use PromptTemplate directly, not ChatPromptTemplate.
+from langchain.prompts import PromptTemplate # Correct import for the prompt fix
+
 
 # --- Configuration ---
 # Get Google API key from Streamlit secrets.
@@ -88,6 +75,10 @@ def load_documents(directory):
     """
     documents = []
     # Iterate through all files in the given directory.
+    if not os.path.exists(directory):
+        st.error(f"Document directory '{directory}' not found. Please create it and add documents.")
+        return []
+
     for filename in os.listdir(directory):
         filepath = os.path.join(directory, filename) # Construct the full file path.
         if os.path.isfile(filepath): # Ensure it's a file, not a subdirectory.
@@ -126,12 +117,13 @@ def setup_rag():
             # Attempt to load the vector store from the persisted directory.
             vectorstore = Chroma(persist_directory=PERSIST_DIRECTORY, embedding_function=embeddings)
             st.session_state['vectorstore'] = vectorstore # Store in session state for future use.
-            st.success("Vector store loaded successfully from disk!")
+            st.success("Vector store loaded successfully!")
         except Exception as e:
             # If loading fails (e.g., corrupted data, version mismatch), log error and try to re-embed.
             st.error(f"Error loading existing vector store: {e}. Attempting to rebuild and re-embed.")
             # Clean up the old directory before rebuilding.
             if os.path.exists(PERSIST_DIRECTORY):
+                st.info(f"Removing corrupted persistence directory: {PERSIST_DIRECTORY}")
                 shutil.rmtree(PERSIST_DIRECTORY)
             # Proceed to create and persist a new vector store.
             vectorstore = create_and_persist_vectorstore(llm, embeddings)
@@ -142,6 +134,7 @@ def setup_rag():
 
     # Define a custom prompt template for the RetrievalQA chain.
     # This guides the LLM on how to behave and use the provided context.
+    # For RetrievalQA with chain_type="stuff", a simple PromptTemplate is expected.
     prompt_template_string = """
     You are an AI-powered HR Assistant for Google. Your task is to provide answers based ONLY on the provided HR policy context.
     If the user asks a question, answer it concisely and directly from the context.
@@ -153,11 +146,10 @@ def setup_rag():
 
     Question: {question}
     """
-    custom_prompt = ChatPromptTemplate.from_messages(
-        [
-            SystemMessagePromptTemplate.from_template(prompt_template_string),
-            HumanMessagePromptTemplate.from_template("{question}"),
-        ]
+    # Using PromptTemplate as required for RetrievalQA with "stuff" chain type.
+    custom_prompt = PromptTemplate(
+        template=prompt_template_string,
+        input_variables=["context", "question"]
     )
 
     # Create the RAG chain using LangChain's RetrievalQA.
@@ -328,11 +320,6 @@ if prompt := st.chat_input("Ask a question about HR policies..."):
                     # Use os.path.basename to get just the filename.
                     full_response += f"- Document: `{os.path.basename(doc.metadata.get('source', 'Unknown'))}`\n  Content: `{content_preview}`\n"
 
-        except OutputParserException as e:
-            # Handle specific errors related to LLM output parsing.
-            full_response = (f"An error occurred while processing the AI response: {e}. "
-                             "The model might have generated an unexpected output format.")
-            st.error(full_response)
         except Exception as e:
             # Catch any other general exceptions during RAG system interaction.
             full_response = (f"An error occurred while getting a response from the RAG system: {e}. "
@@ -344,4 +331,3 @@ if prompt := st.chat_input("Ask a question about HR policies..."):
 
     # Add the assistant's response to the chat history.
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-
