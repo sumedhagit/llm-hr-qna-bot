@@ -329,4 +329,4 @@ if prompt := st.chat_input("Ask a question about HR policies..."):
         message_placeholder.markdown(full_response)
 
     # Add the assistant's response to the chat history.
-    st.session_state.messages.append({"role": "assistant", "content": full_response)
+    st.session_state.messages.append({"role": "assistant", "content": full_response}) # Corrected line 332
