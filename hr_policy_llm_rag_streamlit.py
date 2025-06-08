@@ -147,9 +147,9 @@ def setup_rag():
 
     Question: {question}
     """
-    # Using PromptTemplate.from_template for compatibility with RetrievalQA.
-    # Removed explicit input_variables as from_template usually infers them.
-    custom_prompt = PromptTemplate.from_template(prompt_template_string)
+    # Removed explicit PromptTemplate wrapping. Pass the string directly.
+    # RetrievalQA.from_chain_type with "stuff" often expects a raw string template.
+    custom_prompt = prompt_template_string # Pass the string directly here.
 
     # Create the RAG chain using LangChain's RetrievalQA.
     # The retriever component fetches relevant document chunks.
@@ -158,7 +158,7 @@ def setup_rag():
         llm=llm,
         retriever=vectorstore.as_retriever(search_kwargs={"k": 3}), # Retrieve top 3 relevant chunks.
         chain_type="stuff",
-        prompt=custom_prompt, # Apply the custom prompt.
+        prompt=custom_prompt, # Now 'custom_prompt' is the string directly.
         return_source_documents=True # This allows displaying source documents if desired.
     )
     return qa_chain
@@ -329,4 +329,4 @@ if prompt := st.chat_input("Ask a question about HR policies..."):
         message_placeholder.markdown(full_response)
 
     # Add the assistant's response to the chat history.
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.session_state.messages.append({"role": "assistant", "content": full_response)
